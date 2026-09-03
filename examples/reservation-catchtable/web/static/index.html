@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>캐치테이블 줄서기예약</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Malgun Gothic", sans-serif; max-width: 820px; margin: 0 auto; padding: 20px; background: #f5f6f8; color: #1a1a1a; }
+  h1 { font-size: 20px; margin-bottom: 16px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; color: #333; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; background: #fff; padding: 14px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  form input, form select { padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  input[name=shop] { width: 160px; }
+  input[name=date] { width: 150px; }
+  input[name=person] { width: 60px; }
+  select[name=purpose] { width: 110px; }
+  button { padding: 8px 16px; border: 0; border-radius: 6px; background: #ff5a5f; color: #fff; font-size: 14px; cursor: pointer; }
+  button:hover { background: #e0484d; }
+  button:disabled { background: #999; cursor: default; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  th, td { padding: 8px 10px; text-align: center; font-size: 13px; border-bottom: 1px solid #eee; }
+  th { background: #f0f2f5; }
+  tr:last-child td { border-bottom: none; }
+  .ok { color: #1a8a3c; }
+  .no { color: #999; }
+  .msg { margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 14px; }
+  .msg.error { background: #fdecea; color: #b3261e; }
+  .msg.success { background: #e7f6ec; color: #1a8a3c; white-space: pre-line; }
+  .reserve-btn { padding: 5px 10px; font-size: 12px; }
+  .shop-info { margin-top: 12px; font-size: 13px; color: #555; }
+  .shop-info b { color: #1a1a1a; }
+
+  .auto-box { margin-top: 12px; display: flex; align-items: center; gap: 8px; background: #fff; padding: 12px 14px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; cursor: pointer; inset: 0; background: #ccc; border-radius: 22px; transition: .15s; }
+  .slider::before { content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: .15s; }
+  .switch input:checked + .slider { background: #ff5a5f; }
+  .switch input:checked + .slider::before { transform: translateX(16px); }
+  .switch input:disabled + .slider { opacity: .5; cursor: default; }
+  .auto-label { font-size: 13px; color: #555; }
+
+  #job-panel, #resv-panel { display: none; }
+  .job-status, .resv-status { font-size: 12px; padding: 2px 8px; border-radius: 10px; display: inline-block; }
+  .job-status.running { background: #ffeef0; color: #ff5a5f; }
+  .job-status.reserved { background: #e7f6ec; color: #1a8a3c; }
+  .job-status.stopped { background: #f0f0f0; color: #888; }
+  .resv-status.CONFIRMED { background: #e7f6ec; color: #1a8a3c; }
+  .resv-status.CANCEL { background: #f0f0f0; color: #888; }
+  .job-last { font-size: 12px; color: #555; }
+  .job-remove, .tab-btn { padding: 4px 10px; font-size: 12px; background: #888; }
+  .job-remove:hover, .tab-btn:hover { background: #666; }
+  .tab-btn.active { background: #ff5a5f; }
+  .tabs { display: flex; gap: 6px; margin-top: 28px; }
+  .tabs h2 { margin: 0; margin-right: auto; }
+</style>
+</head>
+<body>
+<h1>🍽️ 캐치테이블 줄서기예약</h1>
+
+<form id="search-form">
+  <input name="shop" placeholder="매장명" required>
+  <input name="date" type="date" required>
+  <input name="person" type="number" min="1" max="20" value="1">
+  <select name="purpose">
+    <option value="EAT_ALONE">혼밥</option>
+    <option value="DRINK_ALONE">혼술</option>
+    <option value="TRAVEL">여행</option>
+    <option value="ETC">기타</option>
+  </select>
+  <button type="submit" id="search-btn">조회</button>
+</form>
+
+<div id="message"></div>
+<div id="shop-info" class="shop-info" style="display:none"></div>
+
+<table id="result" style="display:none">
+  <thead>
+    <tr><th>시간</th><th>잔여</th><th>예약</th></tr>
+  </thead>
+  <tbody id="result-body"></tbody>
+</table>
+
+<div id="auto-box" class="auto-box" style="display:none">
+  <label class="switch">
+    <input type="checkbox" id="auto-toggle">
+    <span class="slider"></span>
+  </label>
+  <span class="auto-label" id="auto-label">이 날짜에 시간대가 열리면 자동으로 줄서기예약</span>
+</div>
+
+<h2 id="job-title" style="display:none">🔄 자동예약 진행상황</h2>
+<table id="job-panel">
+  <thead>
+    <tr><th>매장</th><th>날짜/시간</th><th>상태</th><th>시도</th><th>마지막 확인</th><th>결과</th><th>취소</th></tr>
+  </thead>
+  <tbody id="job-body"></tbody>
+</table>
+
+<div class="tabs">
+  <h2>📋 내 예약</h2>
+  <button class="tab-btn active" data-status="PLANNED">방문예정</button>
+  <button class="tab-btn" data-status="CANCEL">취소/노쇼</button>
+  <button class="tab-btn" data-status="COMPLETE">방문완료</button>
+</div>
+<table id="resv-panel">
+  <thead>
+    <tr><th>매장</th><th>방문일시</th><th>인원</th><th>상태</th><th>취소</th></tr>
+  </thead>
+  <tbody id="resv-body"></tbody>
+</table>
+
+<script>
+const form = document.getElementById('search-form');
+const searchBtn = document.getElementById('search-btn');
+const msgEl = document.getElementById('message');
+const shopInfoEl = document.getElementById('shop-info');
+const table = document.getElementById('result');
+const tbody = document.getElementById('result-body');
+const autoBox = document.getElementById('auto-box');
+const autoToggle = document.getElementById('auto-toggle');
+const autoLabel = document.getElementById('auto-label');
+const jobTitle = document.getElementById('job-title');
+const jobPanel = document.getElementById('job-panel');
+const jobBody = document.getElementById('job-body');
+const resvPanel = document.getElementById('resv-panel');
+const resvBody = document.getElementById('resv-body');
+
+document.querySelector('input[name=date]').valueAsDate = new Date();
+
+let lastSearch = null; // {shop, shop_ref, date, person, purpose}
+
+function showMessage(text, kind) {
+  msgEl.className = 'msg ' + kind;
+  msgEl.textContent = text;
+}
+
+function clearMessage() {
+  msgEl.className = '';
+  msgEl.textContent = '';
+}
+
+function jobKey(shopRef, date, time) {
+  return `${shopRef}_${date}_${time || ''}`;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearMessage();
+  table.style.display = 'none';
+  autoBox.style.display = 'none';
+  shopInfoEl.style.display = 'none';
+  tbody.innerHTML = '';
+  searchBtn.disabled = true;
+  searchBtn.textContent = '조회 중...';
+
+  const fd = new FormData(form);
+  const body = {
+    shop: fd.get('shop').trim(),
+    date: fd.get('date'),
+    person: parseInt(fd.get('person') || '1', 10),
+  };
+  const purpose = fd.get('purpose');
+
+  try {
+    const resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+
+    if (!data.ok) {
+      showMessage('조회 실패: ' + data.error, 'error');
+      return;
+    }
+
+    lastSearch = {shop: data.shop, shop_ref: data.shop_ref, date: body.date, person: body.person, purpose};
+
+    shopInfoEl.style.display = '';
+    shopInfoEl.innerHTML = `<b>${data.shop.label}</b> ${data.shop.subLabel || ''}`;
+
+    renderSlots(data.slots, data.not_available_reason, data.remaining_count);
+    await refreshJobs();
+  } catch (err) {
+    showMessage('요청 중 오류가 발생했습니다: ' + err, 'error');
+  } finally {
+    searchBtn.disabled = false;
+    searchBtn.textContent = '조회';
+  }
+});
+
+function renderSlots(slots, notAvailableReason, remainingCount) {
+  tbody.innerHTML = '';
+
+  if (!slots || slots.length === 0) {
+    table.style.display = 'none';
+    showMessage('예약 가능한 시간대가 없습니다' + (notAvailableReason ? ` (${notAvailableReason})` : '') + '. 자동예약을 켜두면 시간대가 열리는 즉시 등록을 시도합니다.', 'error');
+    autoBox.style.display = 'flex';
+    autoLabel.textContent = '이 날짜에 시간대가 열리면 자동으로 줄서기예약';
+    autoToggle.dataset.time = '';
+    syncAutoToggle();
+    return;
+  }
+
+  table.style.display = '';
+  slots.forEach((s) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${s.operationTime}</td>
+      <td>${s.remainingCount != null ? s.remainingCount + '팀' : (remainingCount != null ? remainingCount + '팀' : '-')}</td>
+      <td></td>
+    `;
+    const btnCell = tr.lastElementChild;
+    const btn = document.createElement('button');
+    btn.className = 'reserve-btn';
+    btn.textContent = '예약';
+    btn.addEventListener('click', () => doRegister(s, btn));
+    btnCell.appendChild(btn);
+    tbody.appendChild(tr);
+  });
+
+  autoBox.style.display = 'none';
+}
+
+async function doRegister(slot, btn) {
+  btn.disabled = true;
+  btn.textContent = '예약 중...';
+  clearMessage();
+
+  try {
+    const resp = await fetch('/api/register', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        shop_ref: lastSearch.shop_ref,
+        shop_name: lastSearch.shop.label,
+        date: lastSearch.date,
+        time: slot.operationTime,
+        table_id: slot.tableIds[0],
+        person: lastSearch.person,
+        purpose: lastSearch.purpose,
+      }),
+    });
+    const data = await resp.json();
+
+    if (data.ok) {
+      const r = data.reservation;
+      showMessage(
+        `🎉 줄서기예약 완료!\n매장: ${r.shopName}\n방문일시: ${r.visitAt}\n인원: ${r.totalPersonCount}명\n예약번호: ${r.reservationRef}\n도착인증 가능 시간: ${r.checkInAvailablePeriod || '-'}`,
+        'success'
+      );
+      btn.textContent = '예약완료';
+      await refreshReservations();
+    } else {
+      showMessage('예약 실패: ' + data.error, 'error');
+      btn.disabled = false;
+      btn.textContent = '예약';
+    }
+  } catch (err) {
+    showMessage('예약 요청 중 오류가 발생했습니다: ' + err, 'error');
+    btn.disabled = false;
+    btn.textContent = '예약';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 자동예약 (원하는 날짜에 시간대가 없으면 켜두는 즉시, 서버가 주기적으로
+// 재조회하다가 시간대가 열리면 자동으로 줄서기예약을 등록)
+// ---------------------------------------------------------------------------
+
+let latestJobs = [];
+
+autoToggle.addEventListener('change', async () => {
+  if (!lastSearch) return;
+  autoToggle.disabled = true;
+  try {
+    if (autoToggle.checked) {
+      const resp = await fetch('/api/auto-reserve/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          shop_ref: lastSearch.shop_ref,
+          shop_name: lastSearch.shop.label,
+          date: lastSearch.date,
+          time: autoToggle.dataset.time || '',
+          person: lastSearch.person,
+          purpose: lastSearch.purpose,
+        }),
+      });
+      const data = await resp.json();
+      if (!data.ok) {
+        showMessage('자동예약 시작 실패: ' + data.error, 'error');
+        autoToggle.checked = false;
+      }
+    } else {
+      const key = jobKey(lastSearch.shop_ref, lastSearch.date, autoToggle.dataset.time || '');
+      const job = latestJobs.find(j => jobKey(j.shop_ref, j.date, j.time) === key && j.status === 'running');
+      if (job) {
+        await fetch('/api/auto-reserve/stop', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({job_id: job.id}),
+        });
+      }
+    }
+  } catch (err) {
+    showMessage('자동예약 요청 중 오류: ' + err, 'error');
+  } finally {
+    autoToggle.disabled = false;
+    await refreshJobs();
+  }
+});
+
+function syncAutoToggle() {
+  if (!lastSearch) return;
+  const key = jobKey(lastSearch.shop_ref, lastSearch.date, autoToggle.dataset.time || '');
+  const job = latestJobs.find(j => jobKey(j.shop_ref, j.date, j.time) === key);
+  autoToggle.checked = !!(job && job.status === 'running');
+}
+
+function jobStatusLabel(status) {
+  if (status === 'running') return '감시 중';
+  if (status === 'reserved') return '예약 완료';
+  if (status === 'stopped') return '중지됨';
+  return status;
+}
+
+function renderJobs(jobs) {
+  if (jobs.length === 0) {
+    jobTitle.style.display = 'none';
+    jobPanel.style.display = 'none';
+    return;
+  }
+  jobTitle.style.display = '';
+  jobPanel.style.display = 'table';
+  jobBody.innerHTML = '';
+
+  jobs.forEach((j) => {
+    const tr = document.createElement('tr');
+    let resultText = '-';
+    if (j.status === 'reserved' && j.result) {
+      resultText = `예약번호 ${j.result.reservationRef} / ${j.result.visitAt}`;
+    }
+
+    tr.innerHTML = `
+      <td>${j.shop_name || j.shop_ref}</td>
+      <td>${j.date}${j.time ? ' ' + j.time : ' (첫 가능 시간)'}</td>
+      <td><span class="job-status ${j.status}">${jobStatusLabel(j.status)}</span></td>
+      <td>${j.attempts}</td>
+      <td class="job-last">${j.updated_at}<br>${j.last_status_text || ''}</td>
+      <td>${resultText}</td>
+      <td></td>
+    `;
+
+    const actionCell = tr.lastElementChild;
+    if (j.status === 'running') {
+      const btn = document.createElement('button');
+      btn.className = 'job-remove';
+      btn.textContent = '취소';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = '취소 중...';
+        await fetch('/api/auto-reserve/stop', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({job_id: j.id}),
+        });
+        await refreshJobs();
+      });
+      actionCell.appendChild(btn);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'job-remove';
+      btn.textContent = '삭제';
+      btn.addEventListener('click', async () => {
+        await fetch('/api/auto-reserve/remove', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({job_id: j.id}),
+        });
+        await refreshJobs();
+      });
+      actionCell.appendChild(btn);
+    }
+
+    jobBody.appendChild(tr);
+  });
+}
+
+async function refreshJobs() {
+  try {
+    const resp = await fetch('/api/auto-reserve/list');
+    const data = await resp.json();
+    if (data.ok) {
+      const prevReserved = new Set(latestJobs.filter(j => j.status === 'reserved').map(j => j.id));
+      latestJobs = data.jobs;
+      renderJobs(latestJobs);
+      syncAutoToggle();
+
+      const newlyReserved = latestJobs.filter(j => j.status === 'reserved' && !prevReserved.has(j.id));
+      if (newlyReserved.length > 0) {
+        newlyReserved.forEach(j => {
+          showMessage(
+            `🎉 자동예약 성공! [${j.shop_name}] ${j.result.visitAt}\n예약번호: ${j.result.reservationRef}`,
+            'success'
+          );
+        });
+        await refreshReservations();
+      }
+    }
+  } catch (err) {
+    // 폴링 실패는 조용히 무시하고 다음 주기에 재시도
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 내 예약 (마이다이닝 화면과 동일한 API) - 방문예정 / 취소·노쇼 / 방문완료
+// ---------------------------------------------------------------------------
+
+let currentTab = 'PLANNED';
+
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentTab = btn.dataset.status;
+    await refreshReservations();
+  });
+});
+
+function renderReservations(items) {
+  if (!items || items.length === 0) {
+    resvPanel.style.display = 'none';
+    return;
+  }
+  resvPanel.style.display = 'table';
+  resvBody.innerHTML = '';
+
+  items.forEach((item) => {
+    const shop = item.shop || {};
+    const reservation = item.reservation || {};
+    const status = (reservation.reservedEntry || {}).reservedEntryStatus || reservation.status || '';
+    const ref = item.reservationRef;
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${shop.shopName || '-'}</td>
+      <td>${reservation.visitAt || '-'}</td>
+      <td>${reservation.totalPersonCount != null ? reservation.totalPersonCount + '명' : '-'}</td>
+      <td><span class="resv-status ${status}">${status}</span></td>
+      <td></td>
+    `;
+
+    const actionCell = tr.lastElementChild;
+    if (currentTab === 'PLANNED' && ref) {
+      const btn = document.createElement('button');
+      btn.className = 'job-remove';
+      btn.textContent = '취소';
+      btn.addEventListener('click', async () => {
+        if (!confirm(`'${shop.shopName}' ${reservation.visitAt} 예약을 취소할까요?`)) return;
+        btn.disabled = true;
+        btn.textContent = '취소 중...';
+        try {
+          const resp = await fetch('/api/cancel', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({reservation_ref: ref}),
+          });
+          const data = await resp.json();
+          if (!data.ok) {
+            showMessage('취소 실패: ' + data.error, 'error');
+            btn.disabled = false;
+            btn.textContent = '취소';
+            return;
+          }
+          await refreshReservations();
+        } catch (err) {
+          showMessage('취소 요청 중 오류: ' + err, 'error');
+          btn.disabled = false;
+          btn.textContent = '취소';
+        }
+      });
+      actionCell.appendChild(btn);
+    } else {
+      actionCell.textContent = '-';
+    }
+
+    resvBody.appendChild(tr);
+  });
+}
+
+async function refreshReservations() {
+  try {
+    const resp = await fetch('/api/reservations?status=' + currentTab);
+    const data = await resp.json();
+    if (data.ok) {
+      renderReservations(data.items);
+    }
+  } catch (err) {
+    // 폴링 실패는 조용히 무시
+  }
+}
+
+refreshJobs();
+refreshReservations();
+setInterval(refreshJobs, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+node_modules/
+*.bundle.js
+__pycache__/
+.env
+apk/
+decompiled/
+logs/
+ui/*.png
+ui/*.xml
+.venv/
+.device_ip
