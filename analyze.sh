@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# analyze.sh — android-pkg-tls-analyzer
+# analyze.sh — android-pkg-api-analyzer
 #
 # Waydroid 컨테이너를 부팅하고 frida를 세팅한 뒤, 지정한 Android 패키지와
 # API 서버 간의 통신 프로토콜을 상세하게 분석(로깅)한다. (TLS 복호화 후 평문)
@@ -21,8 +21,10 @@
 #   [JDK-*]   java.net.HttpURLConnection 사용 시 (OkHttp 이외 트래픽)
 #
 # 사용법:
-#   ./analyze.sh <package.name>                    # 기본 분석 (TLS 원바이트 덤프는 생략)
+#   ./analyze.sh <package.name>                    # 기본 분석, Frida (TLS 원바이트 덤프는 생략)
 #   ./analyze.sh <package.name> --raw-tls           # TLS 원본 바이트 전체 덤프 (로그 큼)
+#   ./analyze.sh <package.name> --mitm              # Frida 대신 mitmproxy로 캡처 (WebView 앱용,
+#                                                    #   README 2절 절차 자동화)
 #   PKG_LOG_DIR=...  ./analyze.sh <package.name>    # 로그 저장 위치 변경 (기본: ./logs)
 #
 # 앱을 정상적으로 사용(로그인, 검색, 예약 등)하고 나서 Ctrl+C 로 종료하면
@@ -34,18 +36,51 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PKG="${1:-${PKG_NAME:-}}"
 if [ -z "$PKG" ]; then
-  echo "usage: $0 <package.name> [--raw-tls]" >&2
+  echo "usage: $0 <package.name> [--raw-tls] [--mitm]" >&2
   exit 1
 fi
 shift || true
 
 RAW_TLS="${PKG_RAW_TLS:-0}"
+MITM=0
 for arg in "$@"; do
-  [ "$arg" = "--raw-tls" ] && RAW_TLS=1
+  case "$arg" in
+    --raw-tls) RAW_TLS=1 ;;
+    --mitm) MITM=1 ;;
+  esac
 done
 
 LOG_DIR="${PKG_LOG_DIR:-$SCRIPT_DIR/logs}"
 export PKG RAW_TLS LOG_DIR
+
+# ---------- cleanup: mitmproxy 전역 프록시 설정 제거 ----------
+# mitmproxy 캡처(README 2절) 절차 중 기기에 설정한 global http_proxy를 정리하지
+# 않고 넘어온 상태로 이 스크립트가 실행될 수 있음. 정상 종료든 Ctrl+C든 스크립트가
+# 끝날 때 항상 확인해서 남아있으면 지운다.
+cleanup_mitm_proxy() {
+  local serial="${IP:-}"
+  if [ -z "$serial" ] && [ -f "$SCRIPT_DIR/.device_ip" ]; then
+    serial="$(cat "$SCRIPT_DIR/.device_ip" 2>/dev/null)"
+  fi
+  [ -z "$serial" ] && return 0
+
+  # settings get global http_proxy 만으로는 안 잡히는 경우가 있음 -- 실제 활성
+  # 프록시 소스는 global_http_proxy_host/_port 개별 키였고, 이게 남아있으면
+  # NetworkMonitor의 connectivity 검증(generate_204)이 죽은 프록시로 계속
+  # 붙으려다 실패해서 네트워크가 영영 VALIDATED되지 않는다(기기 전체가 "인터넷
+  # 안 됨"으로 보이고 WebView 로드도 실패). 둘 다 확인해서 지운다.
+  local proxy host
+  proxy=$(adb -s "$serial:5555" shell settings get global http_proxy 2>/dev/null | tr -d '\r')
+  host=$(adb -s "$serial:5555" shell settings get global global_http_proxy_host 2>/dev/null | tr -d '\r')
+  if { [ -n "$proxy" ] && [ "$proxy" != "null" ] && [ "$proxy" != ":0" ]; } || { [ -n "$host" ] && [ "$host" != "null" ]; }; then
+    echo "mitmproxy 전역 프록시(${proxy:-$host})가 남아있어 제거합니다..." >&2
+    adb -s "$serial:5555" shell settings put global http_proxy :0 >/dev/null 2>&1
+    adb -s "$serial:5555" shell settings delete global global_http_proxy_host >/dev/null 2>&1
+    adb -s "$serial:5555" shell settings delete global global_http_proxy_port >/dev/null 2>&1
+    adb -s "$serial:5555" shell settings delete global global_http_proxy_exclusion_list >/dev/null 2>&1
+  fi
+}
+trap cleanup_mitm_proxy EXIT
 
 # ---------- waydroid boot ----------
 boot_waydroid() {
@@ -89,12 +124,9 @@ fetch_frida_server() {
   find "$FRIDA_LOCAL" -maxdepth 1 -name "frida-server-*-$arch" ! -name "$(basename "$FS_BIN")" -delete
 }
 
-# ---------- device / adb / frida-server setup ----------
-setup_device() {
+# ---------- device / adb setup (Frida, mitmproxy 공통) ----------
+setup_adb() {
   set -e
-  install_frida_tools
-  fetch_frida_server
-
   killall adb 2>/dev/null || true
 
   for i in $(seq 1 60); do sudo waydroid shell -- getprop sys.boot_completed 2>/dev/null | grep -q 1 && break; sleep 2; done
@@ -122,6 +154,14 @@ setup_device() {
     echo "package $PKG not installed in waydroid, aborting" >&2
     exit 1
   fi
+}
+
+# ---------- device / adb / frida-server setup ----------
+setup_device() {
+  set -e
+  install_frida_tools
+  fetch_frida_server
+  setup_adb
 
   RUNNING=""
   for i in $(seq 1 5); do
@@ -147,7 +187,7 @@ export AGENT_BUNDLE
 
 build_agent() {
   set -e
-  [ -f "$AGENT_DIR/package.json" ] || printf '{"name":"android-pkg-tls-analyzer-agent","version":"1.0.0","private":true}\n' > "$AGENT_DIR/package.json"
+  [ -f "$AGENT_DIR/package.json" ] || printf '{"name":"android-pkg-api-analyzer-agent","version":"1.0.0","private":true}\n' > "$AGENT_DIR/package.json"
   if [ ! -d "$AGENT_DIR/node_modules/frida-java-bridge" ]; then
     echo "Installing frida-java-bridge (first run only)..." >&2
     ( cd "$AGENT_DIR" && npm install --no-audit --no-fund frida-java-bridge )
@@ -318,7 +358,7 @@ def main():
     instrument(d, pid, PKG)
     d.resume(pid)
 
-    print("== android-pkg-tls-analyzer ==", file=sys.stderr)
+    print("== android-pkg-api-analyzer ==", file=sys.stderr)
     print("package : %s (pid %d)" % (PKG, pid), file=sys.stderr)
     print("log     : %s" % log_path, file=sys.stderr)
     print("summary : %s  (written on Ctrl+C)" % summary_path, file=sys.stderr)
@@ -337,5 +377,106 @@ main()
 PY
 }
 
+# ---------- mitmproxy 캡처 (README 2절 절차 자동화, WebView 앱용) ----------
+MITM_LOCAL=~/.local/mitmproxy
+MITM_VENV=${MITM_LOCAL}/.venv
+MITM_CA_DIR=~/.mitmproxy
+MITM_CA_CERT="${MITM_CA_DIR}/mitmproxy-ca-cert.pem"
+MITM_PORT="${MITM_PORT:-8888}"
+MITM_ADDON="$SCRIPT_DIR/mitm/addon.py"
+
+install_mitmproxy() {
+  set -e
+  [ -x "$MITM_VENV/bin/mitmdump" ] || { python3 -m venv "$MITM_VENV"; "$MITM_VENV/bin/pip" install -q mitmproxy; }
+}
+
+ensure_mitm_ca_cert() {
+  set -e
+  [ -s "$MITM_CA_CERT" ] && return 0
+  echo "mitmproxy CA 인증서가 없어 생성합니다..." >&2
+  "$MITM_VENV/bin/mitmdump" >/dev/null 2>&1 &
+  local mitm_pid=$!
+  sleep 3
+  kill "$mitm_pid" 2>/dev/null || true
+  wait "$mitm_pid" 2>/dev/null || true
+  [ -s "$MITM_CA_CERT" ] || { echo "mitmproxy CA 인증서 생성 실패, aborting" >&2; exit 1; }
+}
+
+# 컨테이너 시스템 신뢰 저장소에 mitmproxy CA를 설치한다 (이미 설치돼 있으면 건너뜀).
+# 이 Waydroid 이미지는 /system이 별도 마운트가 아니라 루트 자체가 overlay라 `/`를
+# rw로 리마운트해야 함(MITM_CAPTURE_FINDINGS.md 참고).
+install_mitm_ca_in_device() {
+  set -e
+  local hash
+  hash=$(openssl x509 -inform PEM -subject_hash_old -in "$MITM_CA_CERT" | head -1)
+  MITM_CA_TARGET="/system/etc/security/cacerts/${hash}.0"
+  if sudo waydroid shell -- sh -c "[ -f $MITM_CA_TARGET ]" 2>/dev/null; then
+    return 0
+  fi
+  echo "mitmproxy CA를 기기 시스템 신뢰 저장소에 설치합니다..." >&2
+  sudo waydroid shell -- mount -o rw,remount /
+  adb -s "$IP:5555" push "$MITM_CA_CERT" "/data/local/tmp/${hash}.0" >/dev/null
+  sudo waydroid shell -- cp "/data/local/tmp/${hash}.0" "$MITM_CA_TARGET"
+  sudo waydroid shell -- chmod 644 "$MITM_CA_TARGET"
+}
+
+# 기기 전역 프록시가 바라볼 host측 waydroid0 브리지 주소를 찾는다.
+get_bridge_ip() {
+  set -e
+  BRIDGE_IP=$(ip -4 addr show waydroid0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}')
+  if [ -z "$BRIDGE_IP" ]; then
+    echo "waydroid0 브리지 IP를 찾을 수 없습니다, aborting" >&2
+    exit 1
+  fi
+}
+
+# frida spawn을 쓰지 않는 mitm 모드에서는 앱을 정상적인 방법(런처 액티비티)으로
+# 띄운다 -- monkey -c LAUNCHER는 환경에 따라 조용히 실패하는 경우가 있어 대신
+# 런처 액티비티를 직접 알아내서 띄운다(실패 시 monkey로 폴백).
+launch_app() {
+  sudo waydroid shell -- am force-stop "$PKG" >/dev/null 2>&1 || true
+  sleep 1
+  local component
+  component=$(sudo waydroid shell -- cmd package resolve-activity --brief "$PKG" 2>/dev/null | tail -1 | tr -d '\r')
+  if [ -n "$component" ] && [ "${component%%/*}" = "$PKG" ]; then
+    sudo waydroid shell -- am start -n "$component" >/dev/null 2>&1
+  else
+    sudo waydroid shell -- monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  fi
+}
+
+analyze_protocol_mitm() {
+  setup_adb
+  install_mitmproxy
+  ensure_mitm_ca_cert
+  install_mitm_ca_in_device
+  get_bridge_ip
+  mkdir -p "$LOG_DIR"
+
+  adb -s "$IP:5555" shell settings put global http_proxy "$BRIDGE_IP:$MITM_PORT"
+
+  echo "새 프로세스가 CA/프록시를 인식하도록 $PKG 를 재기동합니다..." >&2
+  launch_app
+
+  local base stamp mitm_log
+  base=$(echo "$PKG" | tr '.' '_')
+  stamp=$(date +%Y%m%d_%H%M%S)
+  mitm_log="$LOG_DIR/${base}_mitm_${stamp}.log"
+
+  echo "== android-pkg-api-analyzer (mitmproxy) ==" >&2
+  echo "package : $PKG" >&2
+  echo "proxy   : $BRIDGE_IP:$MITM_PORT" >&2
+  echo "log     : $mitm_log" >&2
+  echo "use the app normally (login, search, booking...), then Ctrl+C" >&2
+
+  "$MITM_VENV/bin/mitmdump" -s "$MITM_ADDON" \
+    --set logfile="$mitm_log" \
+    --listen-host "$BRIDGE_IP" --listen-port "$MITM_PORT"
+}
+
 boot_waydroid
-analyze_protocol
+if [ "$MITM" = "1" ]; then
+  analyze_protocol_mitm
+else
+  analyze_protocol
+fi
