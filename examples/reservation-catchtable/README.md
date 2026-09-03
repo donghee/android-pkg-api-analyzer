@@ -5,6 +5,10 @@
 (3.1절 로그인, 3.6절 등록, 3.7절 취소, 3.8절 목록 조회)에서 mitmproxy로 캡처/분석한 내용을 기반으로
 구현했습니다.
 
+## 실행 화면
+
+![web 실행 화면](docs/images/web-run-screenshot.jpeg)
+
 ## 준비
 
 ```bash
