@@ -1,4 +1,4 @@
-# android-pkg-tls-analyzer
+# android-pkg-api-analyzer
 
 Waydroid에 설치된 임의의 Android 패키지와 API 서버 간 통신을 평문으로 캡처해
 `reports/<pkg_name>_api_analysis.md` API 분석 문서로 정리하는 범용(패키지 비종속) 유틸리티.
@@ -22,7 +22,8 @@ Waydroid에 설치된 임의의 Android 패키지와 API 서버 간 통신을 �
 ./analyze.sh <package.name>              # 앱을 정상 사용하다 Ctrl+C → logs/*.log + *.summary.txt
 ./ui/dump.sh <label>                     # (선택, 별도 터미널) UI 흐름 ↔ 트래픽 로그 대조용
 
-# 2) logs/*.log 에 대상 API 호스트(SNI/DNS)가 안 잡히면 → WebView 앱, mitmproxy로 전환 (2절)
+# 2) logs/*.log 에 대상 API 호스트(SNI/DNS)가 안 잡히면 → WebView 앱, mitmproxy로 전환
+./analyze.sh <package.name> --mitm       # 2절 — CA 설치/프록시 설정까지 자동화
 
 # 3) 정적 분석은 항상 병행
 ./decompile.sh <package.name>            # apk/<pkg>/*.apk + decompiled/<pkg>/{sources,resources}
@@ -36,11 +37,11 @@ Waydroid에 설치된 임의의 Android 패키지와 API 서버 간 통신을 �
 |---|---|
 | 순수 네이티브 앱 (OkHttp/HttpURLConnection) | `analyze.sh` (Frida, `libssl.so` 후킹) |
 | 하이브리드 앱, WebView가 기기 네트워크 스택에 편승 | `analyze.sh` — 자식 프로세스도 spawn-gating으로 자동 계측되어 대개 통함 |
-| 하이브리드 앱, WebView가 자체 BoringSSL을 정적/스트립 상태로 내장 (최신 Chromium 다수) | **mitmproxy로 전환** — `SSL_*` 심볼이 export/import 어디에도 없어 후킹 대상이 없음 |
+| 하이브리드 앱, WebView가 자체 BoringSSL을 정적/스트립 상태로 내장 (최신 Chromium 다수) | **`analyze.sh <package.name> --mitm`** — `SSL_*` 심볼이 export/import 어디에도 없어 후킹 대상이 없음 |
 
 판별법: `analyze.sh`로 앱을 몇 분 정상 사용한 뒤 `logs/*.log`에 대상 API 호스트가 `[SNI]`/`[DNS]`로
 계속 잡히는지 확인. 최초 실행 시만 잡히고 이후 화면 전환/조회에서 전혀 안 잡히면(분석 SDK 트래픽만
-보임) WebView가 별도 TLS 스택을 쓰는 것 — mitmproxy로 전환.
+보임) WebView가 별도 TLS 스택을 쓰는 것 — `--mitm`으로 전환.
 
 ## 1) Frida 캡처 (`analyze.sh`)
 
@@ -55,44 +56,77 @@ adb 연결 → 대상 패키지 spawn+attach → TLS(`SSL_write`/`SSL_read`)/OkH
 사용(로그인/검색/예약 등) 후 `Ctrl+C` → `logs/<pkg>_<timestamp>.log` + `.summary.txt` 생성. 이 단계가
 `.device_ip`를 만들어 두므로 `decompile.sh`보다 먼저 최소 1회 실행해야 함.
 
-## 2) mitmproxy 캡처 (WebView 앱 대안, `mitm/addon.py`)
+일부 앱은 frida spawn 시점 후킹이 앱 초기화(네트워크 스택 등)와 충돌해 WebView 로드 실패 등으로
+이어질 수 있음 — 그런 증상이면 2절 `--mitm` 모드로 전환.
 
-네트워크 레벨 CA-in-the-middle이라 프로세스 내부 심볼 유무와 무관하게 동작.
+## 2) mitmproxy 캡처 (`analyze.sh --mitm`, WebView 앱 대안)
+
+네트워크 레벨 CA-in-the-middle이라 프로세스 내부 심볼 유무와 무관하게 동작. 아래 전체 절차를
+`analyze.sh <package.name> --mitm` 한 번으로 자동화함(수동 절차는 참고용으로 아래에 남겨둠):
 
 ```bash
-# 0) 격리된 venv 설치 (시스템 파이썬 건드리지 않음)
-python3 -m venv ~/.local/mitmproxy/.venv && ~/.local/mitmproxy/.venv/bin/pip install -q mitmproxy
+./analyze.sh <package.name> --mitm
+```
 
-# 1) CA 인증서 생성 (한 번 짧게 실행)
+내부 동작(`setup_adb` 이후):
+
+1. **mitmproxy 설치**: `~/.local/mitmproxy/.venv`에 격리된 venv (없으면 자동 설치, 시스템 파이썬 안 건드림)
+2. **CA 인증서 생성**: `~/.mitmproxy/mitmproxy-ca-cert.pem`이 없으면 `mitmdump`를 짧게 띄웠다 내려서 생성
+3. **기기 시스템 신뢰 저장소에 CA 설치**: 해시(`openssl x509 -subject_hash_old`) 계산 → 이미 설치돼
+   있으면 건너뜀 → 없으면 `/` 를 rw로 리마운트(이 Waydroid 이미지는 `/system`이 별도 마운트가 아니라
+   루트 자체가 overlay라 `mount -o remount,rw /system`이 아니라 `/`를 리마운트해야 함) 후
+   `/system/etc/security/cacerts/<hash>.0`로 설치
+4. **기기 전역 프록시 설정**: `waydroid0` 브리지의 host측 IP를 자동 탐지해서
+   `settings put global http_proxy <bridge-ip>:8888`(포트는 `MITM_PORT` 환경변수로 변경 가능 —
+   8080은 host의 docker-proxy가 이미 점유하고 있을 수 있어 기본값을 8888로 씀)
+5. **앱 재기동**: `am force-stop` 후 런처 액티비티로 재실행(새 프로세스가 CA/프록시를 인식하도록)
+6. **`mitmdump -s mitm/addon.py` 구동** (analyze.sh와 동일한 로그 포맷): `logs/<pkg>_mitm_<timestamp>.log`
+
+앱을 정상 사용(로그인/검색/예약 등) 후 `Ctrl+C` → mitmdump가 정상 종료됨.
+
+**뒷정리는 스크립트가 항상 자동으로 함**: `analyze.sh`는 (Frida/`--mitm` 모드 무관하게) 종료 시
+`trap ... EXIT`로 기기의 전역 프록시를 확인해서 지운다. `settings get global http_proxy`만으로는 안
+잡히는 경우가 있었음(실제 겪은 문제) — Android가 프록시를 `global_http_proxy_host`/`_port` 개별 키에도
+저장하는데 이게 남아있으면 `http_proxy` 조회는 `null`을 보여주면서도 ConnectivityService의
+NetworkMonitor가 `generate_204` 검증을 죽은 프록시로 계속 시도하다 실패해서 **네트워크가 영영
+VALIDATED되지 않고 기기 전체가 "인터넷 안 됨"으로 보이며 WebView 로드도 실패**한다. `analyze.sh`는
+이제 이 개별 키까지 항상 확인해서 지우므로 정상적으로 스크립트를 통해 껐다 켜는 한 이 문제를 다시 겪지
+않아야 함. 수동으로 디버깅해야 한다면:
+```bash
+adb -s <ip>:5555 shell settings list global | grep proxy   # http_proxy 말고 이 키들도 확인
+adb -s <ip>:5555 shell settings put global http_proxy :0
+adb -s <ip>:5555 shell settings delete global global_http_proxy_host
+```
+
+CA 설치를 검증할 때 기기의 **Chrome 앱**(`com.android.chrome`, WebView 컴포넌트와는 별개)으로 접속하면
+"Your connection is not private" 경고가 뜰 수 있음 — Chrome은 Android 시스템 신뢰 저장소를 쓰지 않고
+자체 Chrome Root Store만 신뢰하는 정책으로 전환했기 때문(구글 공식 정책, CA 설치가 잘못된 게 아님).
+분석 대상 앱이 쓰는 시스템 WebView(`com.google.android.webview`)는 시스템 저장소를 그대로 신뢰하므로
+영향 없음 — 캡처가 안 된다면 Chrome 창이 아니라 대상 앱 자체를 확인할 것.
+
+인증서 피닝 앱이면 이 방식도 막힘 — `[ERR]` 라인이나 해당 호스트 연결 실패로 확인. 피닝 우회(Frida
+`javax.net.ssl`/OkHttp `CertificatePinner` 후킹)는 이 프로젝트 범위 밖.
+
+### 수동 절차 (참고용 — `--mitm`이 위 과정을 전부 대신함)
+
+```bash
+python3 -m venv ~/.local/mitmproxy/.venv && ~/.local/mitmproxy/.venv/bin/pip install -q mitmproxy
 ~/.local/mitmproxy/.venv/bin/mitmdump &  sleep 2; kill %1   # ~/.mitmproxy/mitmproxy-ca-cert.pem 생성
 
-# 2) Android 시스템 CA 저장소용 파일명 계산
 HASH=$(openssl x509 -inform PEM -subject_hash_old -in ~/.mitmproxy/mitmproxy-ca-cert.pem | head -1)
-
-# 3) 컨테이너에 root로 설치 — 이 Waydroid 이미지는 /system 별도 마운트가 아니라 루트 자체가
-#    overlay이므로 `mount -o remount,rw /system`이 아니라 `/`를 리마운트해야 함
 sudo waydroid shell -- mount -o rw,remount /
 adb -s <ip>:5555 push ~/.mitmproxy/mitmproxy-ca-cert.pem /data/local/tmp/$HASH.0
 sudo waydroid shell -- cp /data/local/tmp/$HASH.0 /system/etc/security/cacerts/$HASH.0
 sudo waydroid shell -- chmod 644 /system/etc/security/cacerts/$HASH.0
 
-# 4) 기기 전역 프록시 설정 (host의 waydroid0 브리지 주소, 보통 192.168.240.1)
-#    주의: 8080은 docker-proxy가 이미 점유하고 있을 수 있음 → 8888 등으로 확인 후 사용
 adb -s <ip>:5555 shell settings put global http_proxy 192.168.240.1:8888
-
-# 5) mitmdump 구동 (analyze.sh와 동일한 로그 포맷)
 ~/.local/mitmproxy/.venv/bin/mitmdump -s mitm/addon.py \
   --set logfile=logs/<pkg>_mitm_$(date +%Y%m%d_%H%M%S).log \
   --listen-host 192.168.240.1 --listen-port 8888
+# 새 프로세스가 CA/프록시를 인식하도록 앱 재기동 후 정상 사용, 끝나면 Ctrl+C
 
-# 6) 새 프로세스가 CA/프록시를 인식하도록 앱 재기동 후 정상 사용, 끝나면 Ctrl+C
-
-# 7) 뒷정리
-adb -s <ip>:5555 shell settings delete global http_proxy
+adb -s <ip>:5555 shell settings put global http_proxy :0   # 뒷정리
 ```
-
-인증서 피닝 앱이면 이 방식도 막힘 — `[ERR]` 라인이나 해당 호스트 연결 실패로 확인. 피닝 우회(Frida
-`javax.net.ssl`/OkHttp `CertificatePinner` 후킹)는 이 프로젝트 범위 밖.
 
 ## 3) 정적 분석 (jadx 디컴파일, `decompile.sh`)
 
@@ -136,11 +170,12 @@ JADX_NO_RES=1 ./decompile.sh <package.name>   # 리소스 디코딩 생략(속�
 
 ## 출력물 / 파일 맵
 
-- `analyze.sh`, `agent/agent.js` — Frida 캡처 (메인 스크립트 + 패키지 비종속 에이전트)
-- `mitm/addon.py` — mitmproxy 캡처 애드온
+- `analyze.sh`, `agent/agent.js` — Frida 캡처 (메인 스크립트 + 패키지 비종속 에이전트). `--mitm`으로
+  mitmproxy 캡처(2절)도 같은 스크립트가 처리.
+- `mitm/addon.py` — mitmproxy 캡처 애드온 (`analyze.sh --mitm`이 구동)
 - `decompile.sh` — jadx 정적 디컴파일
 - `ui/dump.sh` — uiautomator UI 계층 + 스크린샷
-- `logs/` — 캡처 원본 로그 (`_mitm_` 포함 파일명이 mitmproxy 캡처)
+- `logs/` — 캡처 원본 로그 (`_mitm_` 포함 파일명이 `--mitm` 캡처)
 - `apk/<pkg>/`, `decompiled/<pkg>/` — pull한 APK / jadx 결과 (gitignored)
 - `reports/<pkg_name>_api_analysis.md` — 패키지별 API 분석 문서. **분석이 끝나면 항상 이 디렉토리에 저장.**
 - `examples/<pkg>/` — 분석한 API를 순수 HTTP 클라이언트로 재구현한 검증용 CLI 예제
