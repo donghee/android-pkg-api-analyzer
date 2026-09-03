@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# decompile.sh — android-pkg-tls-analyzer
+# decompile.sh — android-pkg-api-analyzer
 #
 # Waydroid에 설치된 임의의 패키지의 APK(들)를 pull해서 jadx로 정적 디컴파일한다.
 # 동적 캡처(analyze.sh / mitmproxy)로 "무엇이 오가는지"를 본 뒤, 이 스크립트로
